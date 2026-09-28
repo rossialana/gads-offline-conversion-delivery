@@ -1,0 +1,33 @@
+# Salvar este arquivo em: .github/workflows/bigin_google_ads_sync.yml (no repo)
+name: Sync Bigin -> Google Ads (Sheets)
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"   # a cada 3 horas
+  workflow_dispatch: {}       # permite rodar manualmente pelo botão "Run workflow"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install gspread google-auth requests
+
+      - name: Restaurar estado anterior (evita duplicar conversão)
+        uses: actions/cache@v4
+        with:
+          path: sync_state.json
+          key: bigin-google-ads-sync-state
+
+      - name: Rodar sincronização
+        env:
+          BIGIN_CLIENT_ID: ${{ secrets.BIGIN_CLIENT_ID }}
+          BIGIN_CLIENT_SECRET: ${{ secrets.BIGIN_CLIENT_SECRET }}
+          BIGIN_REFRESH_TOKEN: ${{ secrets.BIGIN_REFRESH_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python bigin_google_ads_sync.py
