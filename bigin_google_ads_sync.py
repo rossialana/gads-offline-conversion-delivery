@@ -8,8 +8,14 @@ Conversion Time | ID Transaction | Google Click ID | Conversion Name |
 Conversion Phone | Conversion Email | Conversion Value | Conversion Currency |
 GBRAID | WBRAID | Endereço IP
 
-Mantém um arquivo de estado (sync_state.json) para nunca reenviar o mesmo
-negócio duas vezes -- evita duplicar conversão no Google Ads.
+Mantém um arquivo de estado (sync_state.json), versionado no repo pelo
+próprio workflow do GitHub Actions, para nunca reenviar o mesmo negócio
+duas vezes -- evita duplicar conversão no Google Ads.
+
+Como segurança extra (caso o estado fique desatualizado por qualquer
+motivo), antes de escrever também é checado se o "ID Transaction" já
+existe entre as linhas atuais da planilha -- nesse caso a linha é
+pulada mesmo que o estado local não soubesse dela.
 
 Requer:
   pip install gspread google-auth requests
@@ -42,6 +48,9 @@ HEADER = [
     "Conversion Phone", "Conversion Email", "Conversion Value",
     "Conversion Currency", "GBRAID", "WBRAID", "Endereço IP",
 ]
+
+# Índice (0-based) da coluna "ID Transaction" dentro de HEADER/rows.
+ID_TRANSACTION_COL = 1
 
 # IMPORTANTE: o COQL do Bigin dá erro de sintaxe ao combinar mais de duas
 # condições quando uma delas é "is not null" -- então filtramos só
@@ -140,18 +149,7 @@ def build_row(deal):
     ]
 
 
-def write_to_sheet(rows):
-    if not rows:
-        return
-    import gspread
-    from google.oauth2.service_account import Credentials
-
-    creds_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    creds = Credentials.from_service_account_info(
-        creds_info,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    gc = gspread.authorize(creds)
+def open_worksheet(gc):
     sh = gc.open_by_key(GOOGLE_SHEET_ID)
     try:
         ws = sh.worksheet(GOOGLE_SHEET_TAB)
@@ -161,7 +159,50 @@ def write_to_sheet(rows):
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=GOOGLE_SHEET_TAB, rows=1000, cols=len(HEADER))
         ws.append_row(HEADER)
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
+    return ws
+
+
+def get_existing_transaction_ids(ws):
+    """IDs de negócio (coluna 'ID Transaction') já presentes na planilha.
+
+    Usado como segunda camada de proteção contra duplicatas, além do
+    sync_state.json -- cobre o caso do estado ficar desatualizado.
+    """
+    try:
+        col_values = ws.col_values(ID_TRANSACTION_COL + 1)  # gspread é 1-based
+    except Exception:
+        return set()
+    return set(col_values[1:])  # pula o cabeçalho
+
+
+def write_to_sheet(rows):
+    if not rows:
+        return 0
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    creds_info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+    creds = Credentials.from_service_account_info(
+        creds_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    gc = gspread.authorize(creds)
+    ws = open_worksheet(gc)
+
+    existing_ids = get_existing_transaction_ids(ws)
+    rows_to_write = [
+        row for row in rows if str(row[ID_TRANSACTION_COL]) not in existing_ids
+    ]
+    skipped_dup_in_sheet = len(rows) - len(rows_to_write)
+    if skipped_dup_in_sheet:
+        print(
+            f"Aviso: {skipped_dup_in_sheet} linha(s) já existiam na planilha "
+            "(ID Transaction repetido) -- puladas para não duplicar."
+        )
+
+    if rows_to_write:
+        ws.append_rows(rows_to_write, value_input_option="USER_ENTERED")
+    return len(rows_to_write)
 
 
 def main():
@@ -202,10 +243,12 @@ def main():
         print("\n[--dry-run] Nada foi escrito na planilha nem no estado.")
         return
 
-    write_to_sheet(new_rows)
+    written = write_to_sheet(new_rows)
+    # Todo negócio processado nesta rodada (mesmo os pulados por já estarem
+    # na planilha) entra no estado, para não ficar tentando de novo sempre.
     state["synced_ids"] = list(synced | set(newly_synced_ids))
     save_state(state)
-    print(f"\n{len(new_rows)} linha(s) escrita(s) na planilha, aba '{GOOGLE_SHEET_TAB}'.")
+    print(f"\n{written} linha(s) escrita(s) na planilha, aba '{GOOGLE_SHEET_TAB}'.")
 
 
 if __name__ == "__main__":
