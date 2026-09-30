@@ -125,6 +125,39 @@ def is_google_ads_deal(deal):
     return (deal.get("Lead_Source") or "").strip() == "Google Ads"
 
 
+def parse_amount(value):
+    """Converte o campo Amount do Bigin para float puro.
+
+    O Bigin/Zoho às vezes devolve o valor como string já formatada no
+    locale BR (vírgula decimal, ex.: "1.500,00" ou "150,00"). Se isso for
+    escrito na planilha como texto, o Google Ads falha na importação com
+    "Column 'Conversion_Value...' cannot be converted to a 'double'"
+    (visto nos erros de 29/09/2026 -- 13 linhas rejeitadas, corrigidas
+    manualmente trocando vírgula por ponto).
+
+    Convertendo sempre para float aqui, o valor é escrito na planilha como
+    número puro (não texto), então não depende do locale da planilha nem
+    de como o Bigin formatou o valor originalmente.
+    """
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace("R$", "").replace(" ", "")
+    if not s:
+        return 0.0
+    if "," in s and "." in s:
+        # "1.500,00" -> milhar com ponto, decimal com vírgula
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        # "150,00" -> vírgula é o decimal
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
 def build_row(deal):
     modified = deal["Modified_Time"]  # ex: 2026-09-25T16:19:20-03:00
     dt = datetime.fromisoformat(modified)
@@ -141,7 +174,7 @@ def build_row(deal):
         CONVERSION_NAME,
         phone,
         email,
-        deal.get("Amount") or 0,
+        parse_amount(deal.get("Amount")),
         "BRL",
         deal.get("gbraid") or "",
         deal.get("wbraid") or "",
